@@ -7,6 +7,7 @@
   --text-main: #111827;
   --text-muted: #6b7280;
   --error: #b91c1c;
+  color-scheme: light;
 }
 
 *,
@@ -247,10 +248,17 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+
+  /* force Safari to use our styling, not system button style */
+  -webkit-appearance: none;
+  appearance: none;
+
+  background-color: #ffffff;
+  color: #111827;
+
   border-radius: 999px;
   border: 1px solid var(--border);
   padding: 4px 10px;
-  background: #fff;
   font-size: 12px;
   cursor: pointer;
   transition: all 0.12s ease-out;
@@ -258,9 +266,10 @@ body {
 
 .sheet-chip--selected {
   border-color: var(--primary);
-  background: var(--primary-light);
+  background-color: var(--primary-light);
   color: var(--primary-dark);
 }
+
 
 .sheet-chip:disabled {
   opacity: 0.5;
@@ -285,6 +294,7 @@ body {
 }
 
 .sheet-name {
+  color: inherit;
   white-space: nowrap;
 }
 
