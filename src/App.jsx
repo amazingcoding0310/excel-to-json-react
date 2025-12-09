@@ -8,15 +8,17 @@ function App() {
 
   const [fileName, setFileName] = useState("");
   const [aoaBySheet, setAoaBySheet] = useState({});
-  const [sheets, setSheets] = useState([]); // {name, selected}
+  const [sheets, setSheets] = useState([]); // { name, selected, vendorCode, walletCode }
 
   const [isLoading, setIsLoading] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState("");
 
-  // image config
+  // Global image configuration
   const [baseUrl, setBaseUrl] = useState("");
-  const [imagePrefix, setImagePrefix] = useState(""); // optional "{prefix}" segment
-  const [imageLang, setImageLang] = useState("zh");   // default language
+  const [imageLang, setImageLang] = useState("zh");
+
+  // Per-vendor configs: { [vendorCode]: { prefix: string } }
+  const [vendorConfigs, setVendorConfigs] = useState({});
 
   const normalizeHeader = (h) =>
     String(h || "")
@@ -24,17 +26,73 @@ function App() {
       .toLowerCase()
       .replace(/\s+/g, "");
 
-  // ========== RESET ==========
+  // ----- Helpers -----
+
+  const extractVendorAndWallet = (aoa) => {
+    let vendorCode = null;
+    let walletCode = null;
+
+    for (const row of aoa) {
+      for (let j = 0; j < row.length; j++) {
+        const cell = row[j];
+        if (!cell) continue;
+        const text = String(cell).trim();
+        const norm = normalizeHeader(text).replace(/[:：]/g, "");
+
+        const readNextNonEmpty = () => {
+          for (let k = j + 1; k < row.length; k++) {
+            if (
+              row[k] !== undefined &&
+              row[k] !== null &&
+              row[k] !== ""
+            ) {
+              return String(row[k]).trim();
+            }
+          }
+          return null;
+        };
+
+        if (!walletCode && norm.startsWith("walletcode")) {
+          walletCode = readNextNonEmpty();
+        }
+        if (!vendorCode && norm.startsWith("vendorcode")) {
+          vendorCode = readNextNonEmpty();
+        }
+      }
+    }
+
+    return { vendorCode, walletCode };
+  };
+
+  const buildImageUrl = (vendorCode, gameCode) => {
+    const base = baseUrl.trim().replace(/\/+$/, "");
+    if (!base) return null;
+
+    const v = (vendorCode || "").trim();
+    if (!v) return null;
+
+    const vendorSegment = v.toLowerCase();
+    const prefix =
+      vendorConfigs[v]?.prefix?.trim() || vendorSegment;
+    const langSegment = imageLang.trim() || "en";
+
+    return `${base}/images/games/${vendorSegment}/${prefix}/games/${langSegment}/${gameCode}.png`;
+  };
+
+  // ----- Reset (Remove file) -----
+
   const resetAll = () => {
     setFileName("");
     setError("");
     setJsonOutput("");
     setAoaBySheet({});
     setSheets([]);
-    // keep baseUrl / image config so user doesn’t have to retype
+    setVendorConfigs({});
+    // Keep baseUrl & imageLang so user can reuse them
   };
 
-  // ========== FILE UPLOAD ==========
+  // ----- Step 1: Upload Excel -----
+
   const handleFileChange = (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -44,6 +102,7 @@ function App() {
     setJsonOutput("");
     setAoaBySheet({});
     setSheets([]);
+    setVendorConfigs({});
 
     setIsLoading(true);
     setLoadingMessage("Reading workbook & discovering tabs...");
@@ -57,6 +116,7 @@ function App() {
 
         const bySheet = {};
         const newSheets = [];
+        const newVendorConfigs = {};
 
         wb.SheetNames.forEach((sheetName) => {
           const sheet = wb.Sheets[sheetName];
@@ -70,10 +130,22 @@ function App() {
           if (!aoa || aoa.length === 0) return;
 
           bySheet[sheetName] = aoa;
+
+          const meta = extractVendorAndWallet(aoa);
+          const vendorKey = (meta.vendorCode || sheetName).trim();
+
           newSheets.push({
             name: sheetName,
-            selected: true, // default: all selected
+            selected: true,
+            vendorCode: meta.vendorCode || sheetName,
+            walletCode: meta.walletCode || null,
           });
+
+          if (!newVendorConfigs[vendorKey]) {
+            newVendorConfigs[vendorKey] = {
+              prefix: vendorKey.toLowerCase(),
+            };
+          }
         });
 
         if (!newSheets.length) {
@@ -81,6 +153,7 @@ function App() {
         } else {
           setAoaBySheet(bySheet);
           setSheets(newSheets);
+          setVendorConfigs(newVendorConfigs);
         }
       } catch (err) {
         console.error(err);
@@ -100,7 +173,8 @@ function App() {
     reader.readAsBinaryString(file);
   };
 
-  // ========== SHEET SELECTION ==========
+  // ----- Step 2: Select tabs -----
+
   const toggleSheetSelection = (name) => {
     setSheets((prev) =>
       prev.map((s) =>
@@ -117,32 +191,31 @@ function App() {
     setSheets((prev) => prev.map((s) => ({ ...s, selected: false })));
   };
 
-  // ========== CONVERSION CORE ==========
-  const buildImageUrl = (vendorCode, gameCode) => {
-    const base = baseUrl.trim().replace(/\/+$/, "");
-    if (!base) return null;
+  const totalTabs = sheets.length;
+  const selectedTabs = sheets.filter((s) => s.selected).length;
 
-    const vendorSegment = (vendorCode || "").toLowerCase();
-    const prefixSegment = imagePrefix.trim();
-    const langSegment = imageLang.trim() || "en";
+  const selectedVendorKeys = Array.from(
+    new Set(
+      sheets
+        .filter((s) => s.selected)
+        .map((s) => (s.vendorCode || s.name).trim())
+    )
+  );
 
-    let url = `${base}/images/games/${vendorSegment}`;
-    if (prefixSegment) url += `/${prefixSegment}`;
-    url += `/games/${langSegment}/${gameCode}.png`;
-    return url;
-  };
+  // ----- Sheet -> games (core conversion) -----
 
   const convertSheet = (sheetName, aoa) => {
-    let vendorCode = null;
     let walletCode = null;
+    let vendorCode = null;
 
-    // Find Vendor Code row
+    // 1) Vendor & wallet
     for (const row of aoa) {
       for (let j = 0; j < row.length; j++) {
         const cell = row[j];
         if (!cell) continue;
         const text = String(cell).trim();
         const norm = normalizeHeader(text).replace(/[:：]/g, "");
+
         const readNextNonEmpty = () => {
           for (let k = j + 1; k < row.length; k++) {
             if (
@@ -159,14 +232,13 @@ function App() {
         if (!walletCode && norm.startsWith("walletcode")) {
           walletCode = readNextNonEmpty();
         }
-
         if (!vendorCode && norm.startsWith("vendorcode")) {
           vendorCode = readNextNonEmpty();
         }
       }
     }
 
-    // Find header row with Game Code
+    // 2) Header row with Game Code
     let headerRowIndex = -1;
     for (let i = 0; i < aoa.length; i++) {
       const row = aoa[i];
@@ -198,6 +270,7 @@ function App() {
     };
 
     const games = [];
+    const vCode = (vendorCode || sheetName).trim();
 
     rows.forEach((row) => {
       const nonEmpty = row.some(
@@ -222,7 +295,6 @@ function App() {
       const nameCN = getValue(row, "cngamename");
       const nameEN = getValue(row, "gamename");
 
-      const vCode = vendorCode || sheetName.trim();
       const codeStr = String(gameCode);
 
       games.push({
@@ -249,18 +321,15 @@ function App() {
     if (!games.length) return null;
 
     return {
-      vendorCode: vendorCode || sheetName.trim(),
+      vendorCode: vCode,
       walletCode: walletCode || null,
       games,
     };
   };
 
-  const convertSelectedTabs = () => {
-    if (!baseUrl.trim()) {
-      setError("Please enter Base URL in Step 1 before converting.");
-      return;
-    }
+  // ----- Step 3: Convert with selected tabs + baseUrl + vendor prefixes -----
 
+  const convertSelectedTabs = () => {
     if (!sheets.length) {
       setError("Please upload an Excel file first.");
       return;
@@ -269,6 +338,11 @@ function App() {
     const selected = sheets.filter((s) => s.selected);
     if (!selected.length) {
       setError("Please select at least one tab to convert.");
+      return;
+    }
+
+    if (!baseUrl.trim()) {
+      setError("Please enter Base URL in Step 3 before converting.");
       return;
     }
 
@@ -283,6 +357,7 @@ function App() {
       selected.forEach(({ name }) => {
         const aoa = aoaBySheet[name];
         if (!aoa) return;
+
         const vendorObj = convertSheet(name, aoa);
         if (!vendorObj) return;
 
@@ -305,7 +380,8 @@ function App() {
     }
   };
 
-  // ========== UTIL ==========
+  // ----- JSON utils -----
+
   const downloadJson = () => {
     if (!jsonOutput) return;
     const blob = new Blob([jsonOutput], { type: "application/json" });
@@ -322,8 +398,7 @@ function App() {
     navigator.clipboard.writeText(jsonOutput).catch(console.error);
   };
 
-  const totalTabs = sheets.length;
-  const selectedTabs = sheets.filter((s) => s.selected).length;
+  // ----- JSX -----
 
   return (
     <div className="app-root">
@@ -342,115 +417,75 @@ function App() {
       <header className="app-header">
         <h1>Excel → Vendor Games JSON</h1>
         <p className="subtitle">
-          Configure image URL, upload your game list Excel, choose vendor tabs,
-          and export editable JSON.
+          Upload your Excel, choose tabs, configure per-vendor image prefix,
+          then preview & edit the JSON.
         </p>
 
         <div className="steps">
           <div className="step active">
-            <span className="step-number">1</span> Configure & Upload
+            <span className="step-number">1</span> Upload Excel
           </div>
           <div className={`step ${sheets.length ? "active" : ""}`}>
             <span className="step-number">2</span> Select Tabs
           </div>
+          <div className={`step ${selectedTabs ? "active" : ""}`}>
+            <span className="step-number">3</span> Configure Image URL
+          </div>
           <div className={`step ${jsonOutput ? "active" : ""}`}>
-            <span className="step-number">3</span> View / Edit JSON
+            <span className="step-number">4</span> Preview / Edit JSON
           </div>
         </div>
       </header>
 
       <main className="app-main">
-        {/* LEFT COLUMN */}
+        {/* Left side: Steps 1–3 */}
         <section className="left-column">
-          {/* Config + upload card */}
+          {/* Step 1 */}
           <div className="card">
             <div className="card-header">
-              <h2>1. Base URL & File</h2>
+              <h2>1. Upload Excel File</h2>
             </div>
             <div className="card-body">
-              <div className="field-grid">
-                <div className="field">
-                  <label>
-                    Base URL <span className="required">*</span>
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="https://stg-memberapi.example.com"
-                    value={baseUrl}
-                    onChange={(e) => setBaseUrl(e.target.value)}
-                    disabled={isLoading}
-                  />
-                  <small>
-                    Used as{" "}
-                    <code>
-                      {`{baseUrl}/images/games/{vendor}/{prefix}/games/{lang}/{code}.png`}
-                    </code>
-                  </small>
-                </div>
-                <div className="field">
-                  <label>Image prefix (optional)</label>
-                  <input
-                    type="text"
-                    placeholder="e.g. goldf, obslot_gf"
-                    value={imagePrefix}
-                    onChange={(e) => setImagePrefix(e.target.value)}
-                    disabled={isLoading}
-                  />
-                </div>
-                <div className="field">
-                  <label>Language code</label>
-                  <input
-                    type="text"
-                    placeholder="zh"
-                    value={imageLang}
-                    onChange={(e) => setImageLang(e.target.value)}
-                    disabled={isLoading}
-                  />
-                </div>
-              </div>
+              <label className="file-input-label">
+                <span className="file-button">Choose file</span>
+                <input
+                  type="file"
+                  accept=".xlsx,.xls"
+                  onChange={handleFileChange}
+                  disabled={isLoading}
+                />
+              </label>
 
-              <div className="upload-row">
-                <label className="file-input-label">
-                  <span className="file-button">Choose file</span>
-                  <input
-                    type="file"
-                    accept=".xlsx,.xls"
-                    onChange={handleFileChange}
-                    disabled={isLoading}
-                  />
-                </label>
-
-                <div className="file-info-row">
-                  {fileName ? (
-                    <>
-                      <div className="file-info">
-                        <span className="file-name">{fileName}</span>
-                        {totalTabs > 0 && (
-                          <span className="file-meta">
-                            {totalTabs} tab{totalTabs > 1 ? "s" : ""}
-                          </span>
-                        )}
-                      </div>
-                      <button
-                        type="button"
-                        className="remove-file-button"
-                        onClick={resetAll}
-                        disabled={isLoading}
-                      >
-                        Remove File
-                      </button>
-                    </>
-                  ) : (
-                    <span className="file-placeholder">
-                      No file selected yet
-                    </span>
-                  )}
-                </div>
+              <div className="file-info-row">
+                {fileName ? (
+                  <>
+                    <div className="file-info">
+                      <span className="file-name">{fileName}</span>
+                      {totalTabs > 0 && (
+                        <span className="file-meta">
+                          {totalTabs} tab{totalTabs > 1 ? "s" : ""}
+                        </span>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      className="remove-file-button"
+                      onClick={resetAll}
+                      disabled={isLoading}
+                    >
+                      Remove File
+                    </button>
+                  </>
+                ) : (
+                  <span className="file-placeholder">
+                    No file selected yet
+                  </span>
+                )}
               </div>
             </div>
           </div>
 
-          {/* Tab selection card */}
+          {/* Step 2 */}
           {sheets.length > 0 && (
             <div className="card">
               <div className="card-header">
@@ -495,15 +530,100 @@ function App() {
                       <span className="sheet-checkbox">
                         {sheet.selected ? "✓" : ""}
                       </span>
-                      <span className="sheet-name">{sheet.name}</span>
+                      <span className="sheet-name">
+                        {sheet.name}
+                        {sheet.vendorCode &&
+                          sheet.vendorCode !== sheet.name &&
+                          ` (${sheet.vendorCode})`}
+                      </span>
                     </button>
                   ))}
                 </div>
+              </div>
+            </div>
+          )}
+
+          {/* Step 3 */}
+          {sheets.length > 0 && (
+            <div className="card">
+              <div className="card-header">
+                <h2>3. Configure Image URL</h2>
+              </div>
+              <div className="card-body">
+                <div className="field-grid">
+                  <div className="field">
+                    <label>
+                      Base URL <span className="required">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="https://stg-memberapi.example.com"
+                      value={baseUrl}
+                      onChange={(e) => setBaseUrl(e.target.value)}
+                      disabled={isLoading}
+                    />
+                    <small>
+                      Pattern:{" "}
+                      <code>
+                        {`{baseUrl}/images/games/{vendor}/{prefix}/games/{lang}/{code}.png`}
+                      </code>
+                    </small>
+                  </div>
+                  <div className="field">
+                    <label>Language code</label>
+                    <input
+                      type="text"
+                      placeholder="zh"
+                      value={imageLang}
+                      onChange={(e) => setImageLang(e.target.value)}
+                      disabled={isLoading}
+                    />
+                  </div>
+                </div>
+
+                <h3 className="mt-20">Vendor prefixes</h3>
+                {selectedVendorKeys.length ? (
+                  <div className="vendor-prefix-table">
+                    {selectedVendorKeys.map((vendor) => {
+                      const cfg =
+                        vendorConfigs[vendor] || {
+                          prefix: vendor.toLowerCase(),
+                        };
+                      return (
+                        <div
+                          key={vendor}
+                          className="vendor-prefix-row"
+                        >
+                          <div className="vendor-label">
+                            {vendor}
+                          </div>
+                          <input
+                            className="vendor-prefix-input"
+                            value={cfg.prefix}
+                            onChange={(e) =>
+                              setVendorConfigs((prev) => ({
+                                ...prev,
+                                [vendor]: {
+                                  prefix: e.target.value,
+                                },
+                              }))
+                            }
+                            disabled={isLoading}
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="json-placeholder">
+                    Select at least one tab to see vendor prefixes.
+                  </div>
+                )}
 
                 <button
                   type="button"
                   onClick={convertSelectedTabs}
-                  className="primary-button full-width"
+                  className="primary-button full-width mt-20"
                   disabled={isLoading || !selectedTabs}
                 >
                   Convert Selected Tabs
@@ -519,11 +639,11 @@ function App() {
           )}
         </section>
 
-        {/* RIGHT COLUMN */}
+        {/* Right side: Step 4 – JSON editor */}
         <section className="right-column">
           <div className="card">
             <div className="card-header right-header">
-              <h2>3. JSON Preview / Edit</h2>
+              <h2>4. JSON Preview / Edit</h2>
               <div className="right-header-actions">
                 <button
                   type="button"
@@ -552,8 +672,8 @@ function App() {
                 />
               ) : (
                 <div className="json-placeholder">
-                  JSON will appear here after you convert selected tabs. You
-                  can edit it directly before copying or downloading.
+                  JSON will appear here after you convert selected tabs.
+                  You can edit it directly before copying or downloading.
                 </div>
               )}
             </div>
