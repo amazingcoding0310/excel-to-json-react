@@ -72,11 +72,14 @@ function App() {
     if (!v) return null;
 
     const vendorSegment = v.toLowerCase();
-    const prefix =
-      vendorConfigs[v]?.prefix?.trim() || vendorSegment;
+
+    // ⬇️ prefix is OPTIONAL – if present, it overrides vendor
+    const prefixRaw = vendorConfigs[v]?.prefix?.trim();
+    const folder = (prefixRaw || vendorSegment).toLowerCase();
+
     const langSegment = imageLang.trim() || "en";
 
-    return `${base}/images/games/${vendorSegment}/${prefix}/games/${langSegment}/${gameCode}.png`;
+    return `${base}/images/games/${folder}/games/${langSegment}/${gameCode}.png`;
   };
 
   // ----- Reset (Remove file) -----
@@ -380,6 +383,15 @@ function App() {
     }
   };
 
+  const getVendorDisplayName = (vendorKey) => {
+    // Find the first sheet that uses this vendorKey
+    const sheet = sheets.find(
+      (s) => (s.vendorCode || s.name).trim() === vendorKey
+    );
+    // If found, show the sheet/tab name, otherwise fallback to vendorKey
+    return sheet ? sheet.name : vendorKey;
+  };
+
   // ----- JSON utils -----
 
   const downloadJson = () => {
@@ -565,7 +577,7 @@ function App() {
                     <small>
                       Pattern:{" "}
                       <code>
-                        {`{baseUrl}/images/games/{vendor}/{prefix}/games/{lang}/{code}.png`}
+                        {`{baseUrl}/images/games/{vendor-or-prefix}/games/{lang}/{code}.png`}
                       </code>
                     </small>
                   </div>
@@ -582,38 +594,48 @@ function App() {
                 </div>
 
                 <h3 className="mt-20">Vendor prefixes</h3>
-                {selectedVendorKeys.length ? (
-                  <div className="vendor-prefix-table">
-                    {selectedVendorKeys.map((vendor) => {
-                      const cfg =
-                        vendorConfigs[vendor] || {
-                          prefix: vendor.toLowerCase(),
-                        };
-                      return (
-                        <div
-                          key={vendor}
-                          className="vendor-prefix-row"
-                        >
-                          <div className="vendor-label">
-                            {vendor}
-                          </div>
-                          <input
-                            className="vendor-prefix-input"
-                            value={cfg.prefix}
-                            onChange={(e) =>
-                              setVendorConfigs((prev) => ({
-                                ...prev,
-                                [vendor]: {
-                                  prefix: e.target.value,
-                                },
-                              }))
-                            }
-                            disabled={isLoading}
-                          />
+                {selectedVendorKeys.length > 0 ? (
+                  selectedVendorKeys.map((vendor) => {
+                    const cfg =
+                      vendorConfigs[vendor] || {
+                        prefix: vendor.toLowerCase(),
+                      };
+
+                    const displayName = getVendorDisplayName(vendor);
+
+                    return (
+                      <div key={vendor} className="vendor-prefix-row">
+                        <div className="vendor-label">
+                          {displayName}
+                          {displayName !== vendor && (
+                            <span
+                              style={{
+                                fontSize: 11,
+                                color: "#6b7280",
+                                marginLeft: 4,
+                              }}
+                            >
+                              ({vendor})
+                            </span>
+                          )}
                         </div>
-                      );
-                    })}
-                  </div>
+
+                        <input
+                          className="vendor-prefix-input"
+                          value={cfg.prefix}
+                          onChange={(e) =>
+                            setVendorConfigs((prev) => ({
+                              ...prev,
+                              [vendor]: {
+                                prefix: e.target.value,
+                              },
+                            }))
+                          }
+                          disabled={isLoading}
+                        />
+                      </div>
+                    );
+                  })
                 ) : (
                   <div className="json-placeholder">
                     Select at least one tab to see vendor prefixes.
